@@ -1,11 +1,4 @@
-const Fastify = require("fastify");
+import "dotenv/config";
+import { app } from "./app";
 
-const app = Fastify();
-
-app.get("/health", async () => {
-  return { ok: true, message: "API rodando 🚀" };
-});
-
-app.listen({ port: 3333 }, () => {
-  console.log("Servidor rodando em http://localhost:3333");
-});
+app.listen({ port: 3333, host: "0.0.0.0" });

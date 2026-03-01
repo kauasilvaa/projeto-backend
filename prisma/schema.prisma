@@ -1,0 +1,118 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Token {
+  BRL
+  BTC
+  ETH
+}
+
+enum TransactionType {
+  DEPOSIT
+  SWAP
+  WITHDRAWAL
+}
+
+enum LedgerType {
+  DEPOSIT
+  SWAP_IN
+  SWAP_OUT
+  SWAP_FEE
+  WITHDRAWAL
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String
+  createdAt DateTime @default(now())
+
+  wallet        Wallet?
+  refreshTokens RefreshToken[]
+}
+
+model Wallet {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id])
+  balances  Balance[]
+  ledger    LedgerEntry[]
+  txs       Transaction[]
+}
+
+model Balance {
+  id       String  @id @default(cuid())
+  walletId String
+  token    Token
+  amount   Decimal @default(0)
+
+  wallet   Wallet  @relation(fields: [walletId], references: [id])
+
+  @@unique([walletId, token])
+  @@index([walletId])
+}
+
+model Transaction {
+  id        String          @id @default(cuid())
+  walletId  String
+  type      TransactionType
+  fromToken Token?
+  toToken   Token?
+  amount    Decimal
+  feeAmount Decimal?
+  createdAt DateTime        @default(now())
+
+  wallet    Wallet          @relation(fields: [walletId], references: [id])
+  entries   LedgerEntry[]
+
+  @@index([walletId, createdAt])
+}
+
+model LedgerEntry {
+  id              String     @id @default(cuid())
+  walletId        String
+  transactionId   String
+  type            LedgerType
+  token           Token
+  amount          Decimal
+  previousBalance Decimal
+  newBalance      Decimal
+  createdAt       DateTime   @default(now())
+
+  wallet          Wallet      @relation(fields: [walletId], references: [id])
+  transaction     Transaction @relation(fields: [transactionId], references: [id])
+
+  @@index([walletId, createdAt])
+  @@index([transactionId])
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  userId    String
+  tokenHash String
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+model DepositWebhook {
+  id             String   @id @default(cuid())
+  idempotencyKey String   @unique
+  userId         String
+  token          Token
+  amount         Decimal
+  createdAt      DateTime @default(now())
+
+  @@index([userId])
+}
