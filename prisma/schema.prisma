@@ -6,6 +6,133 @@ datasource db {
   provider = "postgresql"
 }
 
+model User {
+  id            String         @id @default(cuid())
+  email         String         @unique
+  password      String
+  createdAt     DateTime       @default(now())
+  refreshTokens RefreshToken[]
+  wallet        Wallet?
+}
+
+model Wallet {
+  id        String        @id @default(cuid())
+  userId    String        @unique
+  createdAt DateTime      @default(now())
+  balances  Balance[]
+  ledger    LedgerEntry[]
+  swaps     SwapRequest[]
+  txs       Transaction[]
+  user      User          @relation(fields: [userId], references: [id])
+}
+
+model Balance {
+  id       String  @id @default(cuid())
+  walletId String
+  token    Token
+  amount   Decimal @default(0)
+  wallet   Wallet  @relation(fields: [walletId], references: [id])
+
+  @@unique([walletId, token])
+  @@index([walletId])
+}
+
+model Transaction {
+  id        String           @id @default(cuid())
+  walletId  String
+  type      TransactionType
+  fromToken Token?
+  toToken   Token?
+  amount    Decimal
+  feeAmount Decimal?
+  createdAt DateTime         @default(now())
+  deposits  DepositWebhook[]
+  entries   LedgerEntry[]
+  swaps     SwapRequest[]
+  wallet    Wallet           @relation(fields: [walletId], references: [id])
+
+  @@index([walletId, createdAt])
+}
+
+model LedgerEntry {
+  id              String      @id @default(cuid())
+  walletId        String
+  transactionId   String
+  type            LedgerType
+  token           Token
+  amount          Decimal
+  previousBalance Decimal
+  newBalance      Decimal
+  createdAt       DateTime    @default(now())
+  transaction     Transaction @relation(fields: [transactionId], references: [id])
+  wallet          Wallet      @relation(fields: [walletId], references: [id])
+
+  @@index([walletId, createdAt])
+  @@index([transactionId])
+}
+
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+model DepositWebhook {
+  id             String        @id @default(cuid())
+  idempotencyKey String        @unique
+  userId         String
+  token          Token
+  amount         Decimal
+  createdAt      DateTime      @default(now())
+  error          String?
+  processedAt    DateTime?
+  requestBody    Json?
+  requestHeaders Json?
+  status         WebhookStatus @default(RECEIVED)
+  transactionId  String?
+  updatedAt      DateTime      @updatedAt
+  transaction    Transaction?  @relation(fields: [transactionId], references: [id])
+
+  @@index([userId])
+  @@index([status, createdAt])
+  @@index([transactionId])
+}
+
+model SwapRequest {
+  id             String          @id @default(cuid())
+  idempotencyKey String          @unique
+  userId         String
+  walletId       String
+  fromToken      Token
+  toToken        Token
+  amount         Decimal
+  rateUsed       Decimal?
+  grossAmount    Decimal?
+  feeAmount      Decimal?
+  netAmount      Decimal?
+  status         OperationStatus @default(RECEIVED)
+  error          String?
+  processedAt    DateTime?
+  transactionId  String?
+  requestBody    Json?
+  requestHeaders Json?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  transaction    Transaction?    @relation(fields: [transactionId], references: [id])
+  wallet         Wallet          @relation(fields: [walletId], references: [id])
+
+  @@index([walletId, createdAt])
+  @@index([userId])
+  @@index([status, createdAt])
+  @@index([transactionId])
+}
+
 enum Token {
   BRL
   BTC
@@ -26,93 +153,14 @@ enum LedgerType {
   WITHDRAWAL
 }
 
-model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  password  String
-  createdAt DateTime @default(now())
-
-  wallet        Wallet?
-  refreshTokens RefreshToken[]
+enum WebhookStatus {
+  RECEIVED
+  PROCESSED
+  FAILED
 }
 
-model Wallet {
-  id        String   @id @default(cuid())
-  userId    String   @unique
-  createdAt DateTime @default(now())
-
-  user      User     @relation(fields: [userId], references: [id])
-  balances  Balance[]
-  ledger    LedgerEntry[]
-  txs       Transaction[]
-}
-
-model Balance {
-  id       String  @id @default(cuid())
-  walletId String
-  token    Token
-  amount   Decimal @default(0)
-
-  wallet   Wallet  @relation(fields: [walletId], references: [id])
-
-  @@unique([walletId, token])
-  @@index([walletId])
-}
-
-model Transaction {
-  id        String          @id @default(cuid())
-  walletId  String
-  type      TransactionType
-  fromToken Token?
-  toToken   Token?
-  amount    Decimal
-  feeAmount Decimal?
-  createdAt DateTime        @default(now())
-
-  wallet    Wallet          @relation(fields: [walletId], references: [id])
-  entries   LedgerEntry[]
-
-  @@index([walletId, createdAt])
-}
-
-model LedgerEntry {
-  id              String     @id @default(cuid())
-  walletId        String
-  transactionId   String
-  type            LedgerType
-  token           Token
-  amount          Decimal
-  previousBalance Decimal
-  newBalance      Decimal
-  createdAt       DateTime   @default(now())
-
-  wallet          Wallet      @relation(fields: [walletId], references: [id])
-  transaction     Transaction @relation(fields: [transactionId], references: [id])
-
-  @@index([walletId, createdAt])
-  @@index([transactionId])
-}
-
-model RefreshToken {
-  id        String   @id @default(cuid())
-  userId    String
-  tokenHash String
-  expiresAt DateTime
-  revokedAt DateTime?
-  createdAt DateTime @default(now())
-
-  user      User     @relation(fields: [userId], references: [id])
-
-  @@index([userId])
-}
-
-model DepositWebhook {
-  id             String   @id @default(cuid())
-  idempotencyKey String   @unique
-  userId         String
-  token          Token
-  amount         Decimal
-  createdAt      DateTime @default(now())
-
-  @@index([userId])
+enum OperationStatus {
+  RECEIVED
+  PROCESSED
+  FAILED
 }
