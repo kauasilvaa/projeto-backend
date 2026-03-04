@@ -16,14 +16,15 @@ model User {
 }
 
 model Wallet {
-  id        String        @id @default(cuid())
-  userId    String        @unique
-  createdAt DateTime      @default(now())
-  balances  Balance[]
-  ledger    LedgerEntry[]
-  swaps     SwapRequest[]
-  txs       Transaction[]
-  user      User          @relation(fields: [userId], references: [id])
+  id          String              @id @default(cuid())
+  userId      String              @unique
+  createdAt   DateTime            @default(now())
+  balances    Balance[]
+  ledger      LedgerEntry[]
+  swaps       SwapRequest[]
+  withdrawals WithdrawalRequest[]
+  txs         Transaction[]
+  user        User                @relation(fields: [userId], references: [id])
 }
 
 model Balance {
@@ -38,18 +39,19 @@ model Balance {
 }
 
 model Transaction {
-  id        String           @id @default(cuid())
-  walletId  String
-  type      TransactionType
-  fromToken Token?
-  toToken   Token?
-  amount    Decimal
-  feeAmount Decimal?
-  createdAt DateTime         @default(now())
-  deposits  DepositWebhook[]
-  entries   LedgerEntry[]
-  swaps     SwapRequest[]
-  wallet    Wallet           @relation(fields: [walletId], references: [id])
+  id          String              @id @default(cuid())
+  walletId    String
+  type        TransactionType
+  fromToken   Token?
+  toToken     Token?
+  amount      Decimal
+  feeAmount   Decimal?
+  createdAt   DateTime            @default(now())
+  deposits    DepositWebhook[]
+  entries     LedgerEntry[]
+  swaps       SwapRequest[]
+  withdrawals WithdrawalRequest[]
+  wallet      Wallet              @relation(fields: [walletId], references: [id])
 
   @@index([walletId, createdAt])
 }
@@ -116,6 +118,30 @@ model SwapRequest {
   grossAmount    Decimal?
   feeAmount      Decimal?
   netAmount      Decimal?
+  status         OperationStatus @default(RECEIVED)
+  error          String?
+  processedAt    DateTime?
+  transactionId  String?
+  requestBody    Json?
+  requestHeaders Json?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  transaction    Transaction?    @relation(fields: [transactionId], references: [id])
+  wallet         Wallet          @relation(fields: [walletId], references: [id])
+
+  @@index([walletId, createdAt])
+  @@index([userId])
+  @@index([status, createdAt])
+  @@index([transactionId])
+}
+
+model WithdrawalRequest {
+  id             String          @id @default(cuid())
+  idempotencyKey String          @unique
+  userId         String
+  walletId       String
+  token          Token
+  amount         Decimal
   status         OperationStatus @default(RECEIVED)
   error          String?
   processedAt    DateTime?

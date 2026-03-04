@@ -1,5 +1,6 @@
 import axios from "axios";
 import { prisma } from "../../lib/prisma";
+import { redis } from "../../lib/redis";
 import { Prisma, LedgerType, Token, TransactionType } from "@prisma/client";
 
 const COINGECKO_BASE = "https://api.coingecko.com/api/v3/simple/price";
@@ -16,12 +17,7 @@ type QuoteDTO = {
   amount: string;
 };
 
-function calcSwap(
-  amount: Prisma.Decimal,
-  priceBrlPerCrypto: Prisma.Decimal,
-  fromToken: Token,
-  toToken: Token
-) {
+function calcSwap(amount: Prisma.Decimal, priceBrlPerCrypto: Prisma.Decimal, fromToken: Token, toToken: Token) {
   if (fromToken === "BRL" && (toToken === "BTC" || toToken === "ETH")) {
     const gross = amount.div(priceBrlPerCrypto);
     const fee = gross.mul(0.015);
@@ -42,40 +38,42 @@ function calcSwap(
 async function getBrlPriceForToken(token: Token) {
   if (token === "BRL") return new Prisma.Decimal(1);
 
+  const cacheKey = `price:brl:${token}`;
+  const cached = await redis.get(cacheKey);
+
+  if (cached) {
+    return new Prisma.Decimal(cached);
+  }
+
   const id = tokenToCoinGeckoId[token];
   const response = await axios.get(COINGECKO_BASE, {
     params: { ids: id, vs_currencies: "brl" },
   });
 
-  return new Prisma.Decimal(response.data[id].brl);
+  const price = new Prisma.Decimal(response.data[id].brl);
+
+  await redis.set(cacheKey, price.toString(), "EX", 30);
+
+  return price;
 }
 
 export async function getSwapQuote(dto: QuoteDTO) {
-  if (dto.fromToken === dto.toToken)
-    return { status: 400, body: { message: "tokens must be different" } };
+  if (dto.fromToken === dto.toToken) return { status: 400, body: { message: "tokens must be different" } };
 
   const amount = new Prisma.Decimal(dto.amount);
-  if (amount.lte(0))
-    return { status: 400, body: { message: "amount must be > 0" } };
+  if (amount.lte(0)) return { status: 400, body: { message: "amount must be > 0" } };
 
   const supported =
-    (dto.fromToken === "BRL" &&
-      (dto.toToken === "BTC" || dto.toToken === "ETH")) ||
-    ((dto.fromToken === "BTC" || dto.fromToken === "ETH") &&
-      dto.toToken === "BRL");
+    (dto.fromToken === "BRL" && (dto.toToken === "BTC" || dto.toToken === "ETH")) ||
+    ((dto.fromToken === "BTC" || dto.fromToken === "ETH") && dto.toToken === "BRL");
 
-  if (!supported)
-    return { status: 400, body: { message: "swap pair not supported yet" } };
+  if (!supported) return { status: 400, body: { message: "swap pair not supported yet" } };
 
-  const price =
-    dto.fromToken === "BRL"
-      ? await getBrlPriceForToken(dto.toToken)
-      : await getBrlPriceForToken(dto.fromToken);
+  const price = dto.fromToken === "BRL" ? await getBrlPriceForToken(dto.toToken) : await getBrlPriceForToken(dto.fromToken);
 
   const calc = calcSwap(amount, price, dto.fromToken, dto.toToken);
 
-  if (!calc)
-    return { status: 400, body: { message: "swap pair not supported yet" } };
+  if (!calc) return { status: 400, body: { message: "swap pair not supported yet" } };
 
   return {
     status: 200,
@@ -102,29 +100,23 @@ type ExecuteDTO = {
 };
 
 export async function executeSwap(dto: ExecuteDTO) {
-  if (dto.fromToken === dto.toToken)
-    return { status: 400, body: { message: "tokens must be different" } };
+  if (dto.fromToken === dto.toToken) return { status: 400, body: { message: "tokens must be different" } };
 
   const amount = new Prisma.Decimal(dto.amount);
-  if (amount.lte(0))
-    return { status: 400, body: { message: "amount must be > 0" } };
+  if (amount.lte(0)) return { status: 400, body: { message: "amount must be > 0" } };
 
   const supported =
-    (dto.fromToken === "BRL" &&
-      (dto.toToken === "BTC" || dto.toToken === "ETH")) ||
-    ((dto.fromToken === "BTC" || dto.fromToken === "ETH") &&
-      dto.toToken === "BRL");
+    (dto.fromToken === "BRL" && (dto.toToken === "BTC" || dto.toToken === "ETH")) ||
+    ((dto.fromToken === "BTC" || dto.fromToken === "ETH") && dto.toToken === "BRL");
 
-  if (!supported)
-    return { status: 400, body: { message: "swap pair not supported yet" } };
+  if (!supported) return { status: 400, body: { message: "swap pair not supported yet" } };
 
   const wallet = await prisma.wallet.findUnique({
     where: { userId: dto.userId },
     select: { id: true },
   });
 
-  if (!wallet)
-    return { status: 404, body: { message: "user not found" } };
+  if (!wallet) return { status: 404, body: { message: "user not found" } };
 
   const done = await prisma.swapRequest.findUnique({
     where: { idempotencyKey: dto.idempotencyKey },
@@ -143,15 +135,11 @@ export async function executeSwap(dto: ExecuteDTO) {
     };
   }
 
-  const price =
-    dto.fromToken === "BRL"
-      ? await getBrlPriceForToken(dto.toToken)
-      : await getBrlPriceForToken(dto.fromToken);
+  const price = dto.fromToken === "BRL" ? await getBrlPriceForToken(dto.toToken) : await getBrlPriceForToken(dto.fromToken);
 
   const calc = calcSwap(amount, price, dto.fromToken, dto.toToken);
 
-  if (!calc)
-    return { status: 400, body: { message: "swap pair not supported yet" } };
+  if (!calc) return { status: 400, body: { message: "swap pair not supported yet" } };
 
   const grossDest = calc.grossDest;
   const feeDest = calc.feeDest;
@@ -195,29 +183,19 @@ export async function executeSwap(dto: ExecuteDTO) {
 
       await tx.balance.upsert({
         where: { walletId_token: { walletId: wallet.id, token: dto.fromToken } },
-        create: {
-          walletId: wallet.id,
-          token: dto.fromToken,
-          amount: new Prisma.Decimal(0),
-        },
+        create: { walletId: wallet.id, token: dto.fromToken, amount: new Prisma.Decimal(0) },
         update: {},
       });
 
       await tx.balance.upsert({
         where: { walletId_token: { walletId: wallet.id, token: dto.toToken } },
-        create: {
-          walletId: wallet.id,
-          token: dto.toToken,
-          amount: new Prisma.Decimal(0),
-        },
+        create: { walletId: wallet.id, token: dto.toToken, amount: new Prisma.Decimal(0) },
         update: {},
       });
 
       const tokensToLock = [dto.fromToken, dto.toToken].sort();
 
-      const rows = await tx.$queryRaw<
-        Array<{ id: string; token: string; amount: string }>
-      >`
+      const rows = await tx.$queryRaw<Array<{ id: string; token: string; amount: string }>>`
         SELECT "id", "token", "amount"
         FROM "Balance"
         WHERE "walletId" = ${wallet.id}
@@ -231,11 +209,7 @@ export async function executeSwap(dto: ExecuteDTO) {
       if (!fromRow || !toRow) {
         await tx.swapRequest.update({
           where: { id: swapReq.id },
-          data: {
-            status: "FAILED",
-            error: "balance row missing",
-            processedAt: new Date(),
-          },
+          data: { status: "FAILED", error: "balance row missing", processedAt: new Date() },
         });
         return { kind: "ERROR" as const, status: 500, message: "balance row missing" };
       }
@@ -246,11 +220,7 @@ export async function executeSwap(dto: ExecuteDTO) {
       if (fromBefore.lt(amount)) {
         await tx.swapRequest.update({
           where: { id: swapReq.id },
-          data: {
-            status: "FAILED",
-            error: "insufficient balance",
-            processedAt: new Date(),
-          },
+          data: { status: "FAILED", error: "insufficient balance", processedAt: new Date() },
         });
         return { kind: "ERROR" as const, status: 400, message: "insufficient balance" };
       }
@@ -259,15 +229,8 @@ export async function executeSwap(dto: ExecuteDTO) {
       const toAfterGross = toBefore.plus(grossDest);
       const toAfter = toAfterGross.minus(feeDest);
 
-      await tx.balance.update({
-        where: { id: fromRow.id },
-        data: { amount: fromAfter },
-      });
-
-      await tx.balance.update({
-        where: { id: toRow.id },
-        data: { amount: toAfter },
-      });
+      await tx.balance.update({ where: { id: fromRow.id }, data: { amount: fromAfter } });
+      await tx.balance.update({ where: { id: toRow.id }, data: { amount: toAfter } });
 
       const transaction = await tx.transaction.create({
         data: {
@@ -319,11 +282,7 @@ export async function executeSwap(dto: ExecuteDTO) {
 
       await tx.swapRequest.update({
         where: { id: swapReq.id },
-        data: {
-          status: "PROCESSED",
-          processedAt: new Date(),
-          transactionId: transaction.id,
-        },
+        data: { status: "PROCESSED", processedAt: new Date(), transactionId: transaction.id },
       });
 
       return {
@@ -337,31 +296,32 @@ export async function executeSwap(dto: ExecuteDTO) {
       };
     });
 
-    if (result.kind === "REPLAY") {
+    if ((result as any).kind === "REPLAY") {
       return {
         status: 200,
         body: {
           message: "already processed",
           idempotencyKey: dto.idempotencyKey,
-          transactionId: result.transactionId,
-          processedAt: result.processedAt,
+          transactionId: (result as any).transactionId,
+          processedAt: (result as any).processedAt,
         },
       };
     }
 
-    if (result.kind === "ERROR")
-      return { status: result.status, body: { message: result.message } };
+    if ((result as any).kind === "ERROR") {
+      return { status: (result as any).status, body: { message: (result as any).message } };
+    }
 
     return {
       status: 201,
       body: {
         message: "swap executed",
         idempotencyKey: dto.idempotencyKey,
-        transactionId: result.transactionId,
-        rateUsed: result.rateUsed,
-        grossAmount: result.grossAmount,
-        fee: result.fee,
-        netAmount: result.netAmount,
+        transactionId: (result as any).transactionId,
+        rateUsed: (result as any).rateUsed,
+        grossAmount: (result as any).grossAmount,
+        fee: (result as any).fee,
+        netAmount: (result as any).netAmount,
       },
     };
   } catch (e: any) {

@@ -6,6 +6,8 @@ import { walletRoutes } from "./modules/wallet/routes";
 import { webhooksRoutes } from "./modules/webhooks/routes";
 import { swapRoutes } from "./modules/swap/routes";
 import { HttpError } from "./http/http-error";
+import { transactionsRoutes } from "./modules/transactions/routes";
+import { ledgerRoutes } from "./modules/ledger/routes";
 
 
 export const app = Fastify({ logger: true });
@@ -30,6 +32,8 @@ app.register(authRoutes);
 app.register(walletRoutes);
 app.register(webhooksRoutes);
 app.register(swapRoutes);
+app.register(transactionsRoutes);
+app.register(ledgerRoutes);
 
 app.get("/health", async () => {
   return { ok: true, message: "API rodando 🚀" };
