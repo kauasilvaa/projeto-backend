@@ -23,7 +23,9 @@
   },
   "homepage": "https://github.com/kauasilvaa/projeto-backend#readme",
   "devDependencies": {
+    "@types/bcrypt": "^6.0.0",
     "@types/node": "^25.3.2",
+    "@types/pg": "^8.18.0",
     "prisma": "^7.4.2",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.9.3"

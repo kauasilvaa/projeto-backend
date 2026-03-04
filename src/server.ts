@@ -1,4 +1,6 @@
 import "dotenv/config";
 import { app } from "./app";
 
-app.listen({ port: 3333, host: "0.0.0.0" });
+const port = Number(process.env.PORT) || 3333;
+
+app.listen({ port, host: "0.0.0.0" });
