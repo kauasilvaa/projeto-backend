@@ -1,23 +1,18 @@
 import Redis from "ioredis";
 
-const REDIS_URL = process.env.REDIS_URL;
+const redisUrl = process.env.REDIS_URL;
 
-
-export const redis = REDIS_URL
-  ? new Redis(REDIS_URL, {
-      lazyConnect: true,        
-      maxRetriesPerRequest: 1, 
-      enableOfflineQueue: false 
+export const redis = redisUrl
+  ? new Redis(redisUrl, {
+      maxRetriesPerRequest: 1,
+      enableReadyCheck: false,
+      connectTimeout: 5000,
     })
   : null;
 
 
-let warned = false;
 if (redis) {
-  redis.on("error", () => {
-    if (!warned) {
-      warned = true;
-      console.log("[redis] indisponível — rodando sem cache (ok)");
-    }
+  redis.on("error", (err) => {
+    console.error("[redis] error:", err?.message ?? err);
   });
 }

@@ -1,8 +1,10 @@
 # Crypto Wallet API
 
-API REST de uma carteira cripto desenvolvida como teste técnico para vaga de Desenvolvedor Backend.
+API REST de uma carteira cripto desenvolvida como teste técnico para vaga de **Desenvolvedor Backend**.
 
-O sistema permite que usuários possuam uma carteira com múltiplos tokens, realizem depósitos, swaps entre moedas e saques, mantendo um ledger auditável de todas as movimentações.
+O sistema permite que usuários possuam uma carteira com múltiplos tokens, realizem depósitos, swaps entre moedas e saques, mantendo um **ledger auditável** de todas as movimentações financeiras.
+
+A API segue princípios de **consistência transacional, idempotência e rastreabilidade contábil**, garantindo que todas as alterações de saldo possam ser reconstruídas a partir do histórico.
 
 ---
 
@@ -13,15 +15,56 @@ O sistema permite que usuários possuam uma carteira com múltiplos tokens, real
 - Fastify
 - PostgreSQL
 - Prisma ORM
-- JWT (Access + Refresh Token)
+- JWT (Access Token + Refresh Token)
 - Zod para validação de dados
 - CoinGecko API para cotação de criptomoedas
+- Render (deploy da API)
+
+---
+
+# Base URL
+
+API publicada em:
+
+```
+https://projeto-backend-5j0m.onrender.com
+```
+
+Health check:
+
+```
+GET /health
+```
+
+Resposta:
+
+```
+{
+  "ok": true,
+  "message": "API rodando 🚀"
+}
+```
+
+---
+
+# Observação sobre o servidor
+
+A API está hospedada no **Render (plano gratuito)**.
+
+Por limitação da plataforma, a instância entra em modo **sleep após alguns minutos de inatividade**.
+
+Isso significa que:
+
+- A **primeira requisição pode demorar cerca de 30 a 60 segundos**
+- Após isso, o servidor permanece ativo normalmente
+
+Isso **não afeta o funcionamento da API**, apenas o tempo da primeira requisição.
 
 ---
 
 # Arquitetura do projeto
 
-O projeto utiliza uma arquitetura modular baseada em domínio, separando responsabilidades por módulos.
+O projeto utiliza uma **arquitetura modular baseada em domínio**, separando responsabilidades por módulos.
 
 ```
 src/
@@ -54,13 +97,19 @@ service.ts   -> regras de negócio
 routes.ts    -> definição dos endpoints
 ```
 
+Essa organização facilita:
+
+- manutenção
+- escalabilidade
+- isolamento de responsabilidades
+
 ---
 
 # Modelagem de dados
 
-O sistema utiliza um modelo contábil baseado em ledger.
+O sistema utiliza um **modelo contábil baseado em ledger**.
 
-Toda alteração de saldo gera um registro na tabela LedgerEntry, permitindo reconstruir o saldo completo da carteira a partir do histórico.
+Toda alteração de saldo gera um registro na tabela **LedgerEntry**, permitindo reconstruir o saldo completo da carteira a partir do histórico.
 
 Principais entidades:
 
@@ -89,30 +138,59 @@ ETH
 
 # Funcionalidades
 
-## Autenticação
+# Autenticação
 
-- Cadastro de usuário
-- Login com JWT
-- Refresh token
-- Rotas protegidas
+Cadastro de usuário:
+
+```
+POST /auth/register
+```
+
+Login:
+
+```
+POST /auth/login
+```
+
+Refresh token:
+
+```
+POST /auth/refresh
+```
+
+Rotas protegidas utilizam:
+
+```
+Authorization: Bearer <access_token>
+```
 
 ---
 
-## Wallet
+# Wallet
 
 Cada usuário possui uma carteira criada automaticamente.
 
-Endpoint:
+Consultar saldos:
 
 ```
 GET /wallet/balances
 ```
 
-Retorna os saldos por token.
+Exemplo de resposta:
+
+```
+{
+  "balances": [
+    { "token": "BRL", "amount": 395 },
+    { "token": "BTC", "amount": 0.00025859262604093376878 },
+    { "token": "ETH", "amount": 0 }
+  ]
+}
+```
 
 ---
 
-## Depósito (Webhook)
+# Depósito (Webhook)
 
 Simula um serviço externo notificando depósitos.
 
@@ -124,20 +202,63 @@ Payload:
 
 ```
 {
-  userId,
-  token,
-  amount,
-  idempotencyKey
+  "userId": "string",
+  "token": "BRL",
+  "amount": "500",
+  "idempotencyKey": "deposit-123"
 }
 ```
 
-O sistema utiliza idempotencyKey para evitar execução duplicada.
+O sistema utiliza **idempotencyKey** para evitar execução duplicada.
 
 ---
 
-## Swap de tokens
+# Cotação de swap
 
-Permite converter tokens utilizando cotação da API CoinGecko.
+Obtém cotação de conversão entre tokens.
+
+```
+POST /swap/quote
+```
+
+Payload:
+
+```
+{
+  "fromToken": "BRL",
+  "toToken": "BTC",
+  "amount": "100"
+}
+```
+
+Resposta inclui:
+
+- valor bruto
+- taxa
+- valor líquido
+- taxa utilizada
+- tempo de cache da cotação
+
+---
+
+# Execução de swap
+
+Realiza conversão entre tokens.
+
+```
+POST /swap
+```
+
+Payload:
+
+```
+{
+  "fromToken": "BRL",
+  "toToken": "BTC",
+  "amount": "100",
+  "idempotencyKey": "swap-123"
+}
+```
 
 Taxa aplicada:
 
@@ -145,16 +266,17 @@ Taxa aplicada:
 1.5%
 ```
 
-Endpoints:
+Cada swap gera **3 entradas no ledger**:
 
 ```
-GET  /swap/quote
-POST /swap/execute
+SWAP_OUT
+SWAP_IN
+SWAP_FEE
 ```
 
 ---
 
-## Saque
+# Saque
 
 Permite retirar saldo da carteira.
 
@@ -162,14 +284,14 @@ Permite retirar saldo da carteira.
 POST /transactions/withdraw
 ```
 
-Valida:
+Validações:
 
 - saldo suficiente
 - idempotência da operação
 
 ---
 
-## Ledger (Extrato)
+# Ledger (Extrato)
 
 Consulta as movimentações da carteira.
 
@@ -177,15 +299,36 @@ Consulta as movimentações da carteira.
 GET /ledger
 ```
 
-Suporta:
+Suporta paginação:
 
-- paginação
-- filtro por token
-- filtro por tipo
+```
+take
+cursor
+skip
+```
+
+Exemplo:
+
+```
+GET /ledger?take=20
+GET /ledger?take=20&cursor=ledger_id
+```
+
+Cada registro contém:
+
+```
+type
+token
+amount
+previousBalance
+newBalance
+transactionId
+createdAt
+```
 
 ---
 
-## Histórico de transações
+# Histórico de transações
 
 Lista as transações executadas na carteira.
 
@@ -193,13 +336,15 @@ Lista as transações executadas na carteira.
 GET /transactions
 ```
 
-Tipos:
+Tipos de transação:
 
 ```
 DEPOSIT
 SWAP
 WITHDRAWAL
 ```
+
+Também suporta paginação.
 
 ---
 
@@ -215,7 +360,7 @@ swap
 withdrawal
 ```
 
-Evita duplicação de operações.
+Evita duplicação de operações em caso de retries.
 
 ---
 
@@ -227,7 +372,7 @@ Operações críticas utilizam:
 SELECT ... FOR UPDATE
 ```
 
-Garantindo consistência de saldo mesmo com execuções simultâneas.
+Garantindo consistência de saldo mesmo com múltiplas requisições simultâneas.
 
 ---
 
@@ -241,33 +386,33 @@ https://api.coingecko.com/api/v3/simple/price
 
 ---
 
-# Como rodar o projeto
+# Como rodar o projeto localmente
 
-### 1 Instalar dependências
+Instalar dependências:
 
 ```
 npm install
 ```
 
-### 2 Rodar migrations
+Rodar migrations:
 
 ```
 npx prisma migrate dev
 ```
 
-### 3 Gerar Prisma Client
+Gerar Prisma Client:
 
 ```
 npx prisma generate
 ```
 
-### 4 Rodar servidor
+Rodar servidor:
 
 ```
 npm run dev
 ```
 
-Servidor roda em:
+Servidor local:
 
 ```
 http://localhost:3333
@@ -279,12 +424,13 @@ http://localhost:3333
 
 - Cache de cotações com Redis
 - Testes automatizados
-- Deploy em cloud
-- Interface web
+- Rate limiting
+- Observabilidade e métricas
+- Interface web para gerenciamento da carteira
 
 ---
 
 # Autor
 
 Kauã Silva  
-Desenvolvedor Backend
+Desenvolvedor Backend  
