@@ -420,16 +420,6 @@ http://localhost:3333
 
 ---
 
-# Melhorias futuras
-
-- Cache de cotações com Redis
-- Testes automatizados
-- Rate limiting
-- Observabilidade e métricas
-- Interface web para gerenciamento da carteira
-
----
-
 # Autor
 
 Kauã Silva  
