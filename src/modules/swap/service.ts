@@ -40,10 +40,45 @@ function calcSwap(
   return null;
 }
 
+/**
+ * Cache em memória (fallback quando Redis/CoinGecko falhar)
+ */
+type MemCacheEntry = { value: Prisma.Decimal; expiresAt: number; updatedAt: number };
+const memCache = new Map<string, MemCacheEntry>();
+
+function getMemCached(key: string) {
+  const e = memCache.get(key);
+  if (!e) return null;
+  if (Date.now() > e.expiresAt) return null;
+  return e.value;
+}
+
+// Permite usar um valor “stale” por alguns minutos quando CoinGecko dá 429/erro
+function getMemCachedStale(key: string, maxStaleMs: number) {
+  const e = memCache.get(key);
+  if (!e) return null;
+  if (Date.now() - e.updatedAt > maxStaleMs) return null;
+  return e.value;
+}
+
+function setMemCached(key: string, value: Prisma.Decimal, ttlSeconds: number) {
+  const now = Date.now();
+  memCache.set(key, {
+    value,
+    expiresAt: now + ttlSeconds * 1000,
+    updatedAt: now,
+  });
+}
+
 async function getCachedPrice(key: string) {
   try {
+    // se você não configurou Redis no ambiente, evita tentar usar cache
+    if (!process.env.REDIS_URL) return null;
+    if (!redis) return null;
+
     const v = await redis.get(key);
     if (!v) return null;
+
     return new Prisma.Decimal(v);
   } catch {
     return null;
@@ -52,27 +87,76 @@ async function getCachedPrice(key: string) {
 
 async function setCachedPrice(key: string, value: string, ttlSeconds: number) {
   try {
+    if (!process.env.REDIS_URL) return;
+    if (!redis) return;
+
     await redis.set(key, value, "EX", ttlSeconds);
   } catch {}
+}
+
+function quoteTtlSeconds() {
+  const ttl = Number(process.env.QUOTE_CACHE_TTL ?? 30);
+  return Number.isFinite(ttl) && ttl > 0 ? ttl : 30;
 }
 
 async function getBrlPriceForToken(token: Token) {
   if (token === "BRL") return new Prisma.Decimal(1);
 
+  const ttl = quoteTtlSeconds();
   const cacheKey = `quote:brl:${token}`;
-  const cached = await getCachedPrice(cacheKey);
-  if (cached) return cached;
 
+  // 1) Redis
+  const cachedRedis = await getCachedPrice(cacheKey);
+  if (cachedRedis) {
+    setMemCached(cacheKey, cachedRedis, ttl); // alimenta memória também
+    return cachedRedis;
+  }
+
+  // 2) Memória
+  const cachedMem = getMemCached(cacheKey);
+  if (cachedMem) return cachedMem;
+
+  // 3) CoinGecko (com fallback se rate limit / erro)
   const id = tokenToCoinGeckoId[token];
-  const response = await axios.get(COINGECKO_BASE, {
-    params: { ids: id, vs_currencies: "brl" },
-    timeout: 8000,
-  });
 
-  const price = new Prisma.Decimal(response.data[id].brl);
-  await setCachedPrice(cacheKey, price.toString(), Number(process.env.QUOTE_CACHE_TTL ?? 30));
+  try {
+    const response = await axios.get(COINGECKO_BASE, {
+      params: { ids: id, vs_currencies: "brl" },
+      timeout: 8000,
+      headers: {
+        // ajuda a identificar client (não resolve rate limit, mas é bom padrão)
+        "User-Agent": "crypto-wallet-api/1.0",
+      },
+    });
 
-  return price;
+    const raw = response?.data?.[id]?.brl;
+    if (raw === undefined || raw === null) {
+      throw new Error("price provider returned empty data");
+    }
+
+    const price = new Prisma.Decimal(raw);
+
+    setMemCached(cacheKey, price, ttl);
+    await setCachedPrice(cacheKey, price.toString(), ttl);
+
+    return price;
+  } catch (err: any) {
+    // se CoinGecko bloqueou (429) ou deu erro, usa cache “stale” por até 5 min
+    const stale = getMemCachedStale(cacheKey, 5 * 60 * 1000);
+    if (stale) return stale;
+
+    // tenta também o Redis de novo (caso tenha voltado)
+    const retryRedis = await getCachedPrice(cacheKey);
+    if (retryRedis) return retryRedis;
+
+    // sem fallback => sobe erro “controlado”
+    const status = err?.response?.status;
+    if (status === 429) {
+      throw new Error("PRICE_RATE_LIMIT");
+    }
+
+    throw new Error("PRICE_PROVIDER_DOWN");
+  }
 }
 
 export async function getSwapQuote(dto: QuoteDTO) {
@@ -90,10 +174,18 @@ export async function getSwapQuote(dto: QuoteDTO) {
   if (!supported)
     return { status: 400, body: { message: "swap pair not supported yet" } };
 
-  const price =
-    dto.fromToken === "BRL"
-      ? await getBrlPriceForToken(dto.toToken)
-      : await getBrlPriceForToken(dto.fromToken);
+  let price: Prisma.Decimal;
+  try {
+    price =
+      dto.fromToken === "BRL"
+        ? await getBrlPriceForToken(dto.toToken)
+        : await getBrlPriceForToken(dto.fromToken);
+  } catch (e: any) {
+    if (e?.message === "PRICE_RATE_LIMIT") {
+      return { status: 503, body: { message: "price provider rate limited, try again shortly" } };
+    }
+    return { status: 503, body: { message: "price provider unavailable, try again shortly" } };
+  }
 
   const calc = calcSwap(amount, price, dto.fromToken, dto.toToken);
   if (!calc)
@@ -109,7 +201,7 @@ export async function getSwapQuote(dto: QuoteDTO) {
       fee: calc.feeDest.toString(),
       netAmount: calc.netDest.toString(),
       rateUsed: calc.rate.toString(),
-      cachedTtlSeconds: Number(process.env.QUOTE_CACHE_TTL ?? 30),
+      cachedTtlSeconds: quoteTtlSeconds(),
     },
   };
 }
@@ -163,10 +255,18 @@ export async function executeSwap(dto: ExecuteDTO) {
     };
   }
 
-  const price =
-    dto.fromToken === "BRL"
-      ? await getBrlPriceForToken(dto.toToken)
-      : await getBrlPriceForToken(dto.fromToken);
+  let price: Prisma.Decimal;
+  try {
+    price =
+      dto.fromToken === "BRL"
+        ? await getBrlPriceForToken(dto.toToken)
+        : await getBrlPriceForToken(dto.fromToken);
+  } catch (e: any) {
+    if (e?.message === "PRICE_RATE_LIMIT") {
+      return { status: 503, body: { message: "price provider rate limited, try again shortly" } };
+    }
+    return { status: 503, body: { message: "price provider unavailable, try again shortly" } };
+  }
 
   const calc = calcSwap(amount, price, dto.fromToken, dto.toToken);
   if (!calc) return { status: 400, body: { message: "swap pair not supported yet" } };
@@ -338,7 +438,8 @@ export async function executeSwap(dto: ExecuteDTO) {
       };
     }
 
-    if (result.kind === "ERROR") return { status: result.status, body: { message: result.message } };
+    if (result.kind === "ERROR")
+      return { status: result.status, body: { message: result.message } };
 
     return {
       status: 201,
