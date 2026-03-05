@@ -17,7 +17,12 @@ type QuoteDTO = {
   amount: string;
 };
 
-function calcSwap(amount: Prisma.Decimal, priceBrlPerCrypto: Prisma.Decimal, fromToken: Token, toToken: Token) {
+function calcSwap(
+  amount: Prisma.Decimal,
+  priceBrlPerCrypto: Prisma.Decimal,
+  fromToken: Token,
+  toToken: Token
+) {
   if (fromToken === "BRL" && (toToken === "BTC" || toToken === "ETH")) {
     const gross = amount.div(priceBrlPerCrypto);
     const fee = gross.mul(0.015);
@@ -35,45 +40,64 @@ function calcSwap(amount: Prisma.Decimal, priceBrlPerCrypto: Prisma.Decimal, fro
   return null;
 }
 
+async function getCachedPrice(key: string) {
+  try {
+    const v = await redis.get(key);
+    if (!v) return null;
+    return new Prisma.Decimal(v);
+  } catch {
+    return null;
+  }
+}
+
+async function setCachedPrice(key: string, value: string, ttlSeconds: number) {
+  try {
+    await redis.set(key, value, "EX", ttlSeconds);
+  } catch {}
+}
+
 async function getBrlPriceForToken(token: Token) {
   if (token === "BRL") return new Prisma.Decimal(1);
 
-  const cacheKey = `price:brl:${token}`;
-  const cached = await redis.get(cacheKey);
-
-  if (cached) {
-    return new Prisma.Decimal(cached);
-  }
+  const cacheKey = `quote:brl:${token}`;
+  const cached = await getCachedPrice(cacheKey);
+  if (cached) return cached;
 
   const id = tokenToCoinGeckoId[token];
   const response = await axios.get(COINGECKO_BASE, {
     params: { ids: id, vs_currencies: "brl" },
+    timeout: 8000,
   });
 
   const price = new Prisma.Decimal(response.data[id].brl);
-
-  await redis.set(cacheKey, price.toString(), "EX", 30);
+  await setCachedPrice(cacheKey, price.toString(), Number(process.env.QUOTE_CACHE_TTL ?? 30));
 
   return price;
 }
 
 export async function getSwapQuote(dto: QuoteDTO) {
-  if (dto.fromToken === dto.toToken) return { status: 400, body: { message: "tokens must be different" } };
+  if (dto.fromToken === dto.toToken)
+    return { status: 400, body: { message: "tokens must be different" } };
 
   const amount = new Prisma.Decimal(dto.amount);
-  if (amount.lte(0)) return { status: 400, body: { message: "amount must be > 0" } };
+  if (amount.lte(0))
+    return { status: 400, body: { message: "amount must be > 0" } };
 
   const supported =
     (dto.fromToken === "BRL" && (dto.toToken === "BTC" || dto.toToken === "ETH")) ||
     ((dto.fromToken === "BTC" || dto.fromToken === "ETH") && dto.toToken === "BRL");
 
-  if (!supported) return { status: 400, body: { message: "swap pair not supported yet" } };
+  if (!supported)
+    return { status: 400, body: { message: "swap pair not supported yet" } };
 
-  const price = dto.fromToken === "BRL" ? await getBrlPriceForToken(dto.toToken) : await getBrlPriceForToken(dto.fromToken);
+  const price =
+    dto.fromToken === "BRL"
+      ? await getBrlPriceForToken(dto.toToken)
+      : await getBrlPriceForToken(dto.fromToken);
 
   const calc = calcSwap(amount, price, dto.fromToken, dto.toToken);
-
-  if (!calc) return { status: 400, body: { message: "swap pair not supported yet" } };
+  if (!calc)
+    return { status: 400, body: { message: "swap pair not supported yet" } };
 
   return {
     status: 200,
@@ -85,6 +109,7 @@ export async function getSwapQuote(dto: QuoteDTO) {
       fee: calc.feeDest.toString(),
       netAmount: calc.netDest.toString(),
       rateUsed: calc.rate.toString(),
+      cachedTtlSeconds: Number(process.env.QUOTE_CACHE_TTL ?? 30),
     },
   };
 }
@@ -100,16 +125,19 @@ type ExecuteDTO = {
 };
 
 export async function executeSwap(dto: ExecuteDTO) {
-  if (dto.fromToken === dto.toToken) return { status: 400, body: { message: "tokens must be different" } };
+  if (dto.fromToken === dto.toToken)
+    return { status: 400, body: { message: "tokens must be different" } };
 
   const amount = new Prisma.Decimal(dto.amount);
-  if (amount.lte(0)) return { status: 400, body: { message: "amount must be > 0" } };
+  if (amount.lte(0))
+    return { status: 400, body: { message: "amount must be > 0" } };
 
   const supported =
     (dto.fromToken === "BRL" && (dto.toToken === "BTC" || dto.toToken === "ETH")) ||
     ((dto.fromToken === "BTC" || dto.fromToken === "ETH") && dto.toToken === "BRL");
 
-  if (!supported) return { status: 400, body: { message: "swap pair not supported yet" } };
+  if (!supported)
+    return { status: 400, body: { message: "swap pair not supported yet" } };
 
   const wallet = await prisma.wallet.findUnique({
     where: { userId: dto.userId },
@@ -135,10 +163,12 @@ export async function executeSwap(dto: ExecuteDTO) {
     };
   }
 
-  const price = dto.fromToken === "BRL" ? await getBrlPriceForToken(dto.toToken) : await getBrlPriceForToken(dto.fromToken);
+  const price =
+    dto.fromToken === "BRL"
+      ? await getBrlPriceForToken(dto.toToken)
+      : await getBrlPriceForToken(dto.fromToken);
 
   const calc = calcSwap(amount, price, dto.fromToken, dto.toToken);
-
   if (!calc) return { status: 400, body: { message: "swap pair not supported yet" } };
 
   const grossDest = calc.grossDest;
@@ -296,32 +326,30 @@ export async function executeSwap(dto: ExecuteDTO) {
       };
     });
 
-    if ((result as any).kind === "REPLAY") {
+    if (result.kind === "REPLAY") {
       return {
         status: 200,
         body: {
           message: "already processed",
           idempotencyKey: dto.idempotencyKey,
-          transactionId: (result as any).transactionId,
-          processedAt: (result as any).processedAt,
+          transactionId: result.transactionId,
+          processedAt: result.processedAt,
         },
       };
     }
 
-    if ((result as any).kind === "ERROR") {
-      return { status: (result as any).status, body: { message: (result as any).message } };
-    }
+    if (result.kind === "ERROR") return { status: result.status, body: { message: result.message } };
 
     return {
       status: 201,
       body: {
         message: "swap executed",
         idempotencyKey: dto.idempotencyKey,
-        transactionId: (result as any).transactionId,
-        rateUsed: (result as any).rateUsed,
-        grossAmount: (result as any).grossAmount,
-        fee: (result as any).fee,
-        netAmount: (result as any).netAmount,
+        transactionId: result.transactionId,
+        rateUsed: result.rateUsed,
+        grossAmount: result.grossAmount,
+        fee: result.fee,
+        netAmount: result.netAmount,
       },
     };
   } catch (e: any) {
